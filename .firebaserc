@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "ppe-master-data"
+  },
+  "targets": {
+    "ppe-master-data": {
+      "hosting": {
+        "site-09": [
+          "ppe-eng"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
