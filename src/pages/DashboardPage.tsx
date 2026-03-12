@@ -91,6 +91,7 @@ interface AppItem {
   color: string;
   desc: string;
   order?: number;
+  active?: boolean;
 }
 
 // ──────────────────────────────────────────────
@@ -149,6 +150,7 @@ export default function DashboardPage() {
             const apps = snapshot.docs
               .filter((d) => d.id !== '_meta')
               .map((d) => d.data() as AppItem)
+              .filter((app) => app.active !== false)
               .sort((a, b) => (a.order || 0) - (b.order || 0));
             loaded[category] = {
               title: metaDoc ? (metaDoc.data().title as string) : category,
@@ -364,10 +366,24 @@ export default function DashboardPage() {
                   rel="noopener noreferrer"
                   className="app-card bg-white p-6 rounded-2xl border border-slate-200 transition-all hover:-translate-y-1 hover:shadow-lg flex flex-col items-center text-center group relative overflow-hidden"
                 >
+                  {/* Active checkmark badge */}
+                  {app.active === true && (
+                    <div className="absolute top-3 left-3 w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center shadow-md z-10">
+                      <i className="fas fa-check text-xs"></i>
+                    </div>
+                  )}
+                  {/* External link icon */}
+                  <div className="absolute top-3 right-3 text-slate-300 group-hover:text-indigo-400 transition-colors">
+                    <i className="fas fa-arrow-up-right-from-square text-xs"></i>
+                  </div>
                   <div
                     className={`w-16 h-16 ${app.color} text-white rounded-2xl flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition-transform shadow-lg`}
                   >
-                    <i className={`fas ${app.icon}`}></i>
+                    {app.icon && !app.icon.startsWith('fa-') ? (
+                      <span className="text-3xl leading-none">{app.icon}</span>
+                    ) : (
+                      <i className={`fas ${app.icon || 'fa-link'}`}></i>
+                    )}
                   </div>
                   <h3 className="font-bold text-slate-800 mb-2">{app.name}</h3>
                   <p className="text-xs text-slate-500 mb-4 h-8 overflow-hidden">{app.desc}</p>

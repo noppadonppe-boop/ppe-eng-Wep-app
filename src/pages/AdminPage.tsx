@@ -12,19 +12,69 @@ import {
   getDoc,
   setDoc,
   updateDoc,
+  deleteDoc,
   query,
   orderBy,
 } from 'firebase/firestore';
 import { USER_ROLES, type UserProfile, type UserRole } from '../types/auth';
 
 type FilterTab = 'all' | 'pending' | 'approved' | 'rejected';
-type AdminTab = 'users' | 'permissions';
+type AdminTab = 'users' | 'permissions' | 'cards';
+
+// ── Card Management Types & Constants ─────────────────────────────────────────
+interface CardItem {
+  id: string;
+  name: string;
+  url: string;
+  icon: string;   // emoji char หรือ 'fa-xxx'
+  color: string;  // tailwind bg class
+  desc: string;
+  active: boolean;
+  order: number;
+}
+
+interface CardForm {
+  name: string;
+  url: string;
+  icon: string;
+  color: string;
+  desc: string;
+  active: boolean;
+  category: string;
+}
+
+const CARD_COLORS = [
+  'bg-indigo-600', 'bg-sky-500',    'bg-teal-500',   'bg-emerald-500',
+  'bg-green-600',  'bg-lime-500',   'bg-yellow-500', 'bg-orange-500',
+  'bg-red-500',    'bg-rose-500',   'bg-pink-500',   'bg-fuchsia-500',
+  'bg-purple-600', 'bg-violet-600', 'bg-slate-700',  'bg-slate-400',
+];
+
+const EMOJI_SUGGESTIONS = [
+  '🏢','🗞️','📊','📋','📌','📁','🖇️','🌐',
+  '🔧','💡','📝','🎯','🚀','📈','💼','🔍',
+  '⚙️','🛡️','📐','🏗️','🧾','📦','🖥️','📡',
+];
 
 export default function AdminPage() {
   const { userProfile } = useAuth();
   const navigate = useNavigate();
 
   const [adminTab, setAdminTab] = useState<AdminTab>('users');
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    async function loadPending() {
+      try {
+        const snap = await getDocs(collection(db, FIRESTORE_PATHS.users));
+        const count = snap.docs.filter(
+          (d) => (d.data() as { status: string }).status === 'pending'
+        ).length;
+        setPendingCount(count);
+      } catch { /* silent */ }
+    }
+    loadPending();
+  }, []);
 
   async function handleLogout() {
     await logout();
@@ -60,16 +110,22 @@ export default function AdminPage() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
         {/* Admin Tab Switcher */}
-        <div className="flex gap-1 mb-6 bg-slate-200 rounded-xl p-1 w-fit">
+        <div className="flex gap-1 mb-6 bg-slate-200 rounded-xl p-1 w-fit flex-wrap">
           <button
             onClick={() => setAdminTab('users')}
-            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-colors ${
+            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 ${
               adminTab === 'users'
                 ? 'bg-white text-indigo-700 shadow-sm'
                 : 'text-slate-600 hover:text-slate-800'
             }`}
           >
-            <i className="fas fa-users mr-2"></i>จัดการผู้ใช้งาน
+            <i className="fas fa-users"></i>
+            User Management
+            {pendingCount > 0 && (
+              <span className="bg-red-500 text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                {pendingCount}
+              </span>
+            )}
           </button>
           <button
             onClick={() => setAdminTab('permissions')}
@@ -81,12 +137,24 @@ export default function AdminPage() {
           >
             <i className="fas fa-key mr-2"></i>จัดการสิทธิ์เมนู
           </button>
+          <button
+            onClick={() => setAdminTab('cards')}
+            className={`px-5 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              adminTab === 'cards'
+                ? 'bg-white text-indigo-700 shadow-sm'
+                : 'text-slate-600 hover:text-slate-800'
+            }`}
+          >
+            <i className="fas fa-layer-group mr-2"></i>จัดการ Cards
+          </button>
         </div>
 
         {adminTab === 'users' ? (
           <UserManagement userProfile={userProfile} />
-        ) : (
+        ) : adminTab === 'permissions' ? (
           <PermissionManagement userProfile={userProfile} />
+        ) : (
+          <CardManagement userProfile={userProfile} />
         )}
       </main>
     </div>
@@ -526,6 +594,473 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
           </table>
         </div>
       </div>
+    </>
+  );
+}
+
+// ══════════════════════════════════════════════
+// Tab 3: Card Management
+// ══════════════════════════════════════════════
+function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfile | null }) {
+  const [selectedCat, setSelectedCat] = useState<string>(MENU_ITEMS[0].key);
+  const [allCards, setAllCards] = useState<Record<string, CardItem[]>>({});
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [editCard, setEditCard] = useState<CardItem | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CardItem | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const DEFAULT_FORM: CardForm = {
+    name: '', url: '', icon: '🌐', color: 'bg-indigo-600',
+    desc: '', active: false, category: MENU_ITEMS[0].key,
+  };
+  const [form, setForm] = useState<CardForm>(DEFAULT_FORM);
+
+  useEffect(() => { loadAllCards(); }, []);
+
+  async function loadAllCards() {
+    setLoading(true);
+    try {
+      const loaded: Record<string, CardItem[]> = {};
+      for (const item of MENU_ITEMS) {
+        const ref = collection(db, 'PPE-eng-Wep-app', 'root', item.key);
+        const snap = await getDocs(ref);
+        loaded[item.key] = snap.docs
+          .filter((d) => d.id !== '_meta')
+          .map((d) => ({ id: d.id, ...d.data() } as CardItem))
+          .sort((a, b) => (a.order || 0) - (b.order || 0));
+      }
+      setAllCards(loaded);
+    } catch (err) {
+      console.error('Error loading cards:', err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openAddModal() {
+    setEditCard(null);
+    setForm({ ...DEFAULT_FORM, category: selectedCat });
+    setShowModal(true);
+  }
+
+  function openEditModal(card: CardItem) {
+    setEditCard(card);
+    setForm({
+      name: card.name,
+      url: card.url,
+      icon: card.icon,
+      color: card.color,
+      desc: card.desc,
+      active: card.active ?? false,
+      category: selectedCat,
+    });
+    setShowModal(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) return;
+    setSaving(true);
+    try {
+      const category = form.category;
+      const urlVal = form.url.trim() || '#';
+      if (editCard) {
+        const ref = doc(db, 'PPE-eng-Wep-app', 'root', selectedCat, editCard.id);
+        await updateDoc(ref, {
+          name: form.name.trim(), url: urlVal, icon: form.icon,
+          color: form.color, desc: form.desc.trim(), active: form.active,
+        });
+        const updated = { ...editCard, name: form.name.trim(), url: urlVal, icon: form.icon, color: form.color, desc: form.desc.trim(), active: form.active };
+        setAllCards((prev) => ({
+          ...prev,
+          [selectedCat]: (prev[selectedCat] || []).map((c) => c.id === editCard.id ? updated : c),
+        }));
+      } else {
+        const catCards = allCards[category] || [];
+        const newDocRef = doc(collection(db, 'PPE-eng-Wep-app', 'root', category));
+        const newCard: CardItem = {
+          id: newDocRef.id,
+          name: form.name.trim(), url: urlVal, icon: form.icon,
+          color: form.color, desc: form.desc.trim(), active: form.active,
+          order: catCards.length,
+        };
+        await setDoc(newDocRef, newCard);
+        setAllCards((prev) => ({ ...prev, [category]: [...(prev[category] || []), newCard] }));
+        setSelectedCat(category);
+      }
+      setShowModal(false);
+    } catch (err) {
+      console.error('Error saving card:', err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(card: CardItem) {
+    try {
+      await deleteDoc(doc(db, 'PPE-eng-Wep-app', 'root', selectedCat, card.id));
+      setAllCards((prev) => ({
+        ...prev,
+        [selectedCat]: (prev[selectedCat] || []).filter((c) => c.id !== card.id),
+      }));
+      setDeleteTarget(null);
+    } catch (err) {
+      console.error('Error deleting card:', err);
+    }
+  }
+
+  async function toggleActive(card: CardItem) {
+    try {
+      const ref = doc(db, 'PPE-eng-Wep-app', 'root', selectedCat, card.id);
+      await updateDoc(ref, { active: !card.active });
+      setAllCards((prev) => ({
+        ...prev,
+        [selectedCat]: (prev[selectedCat] || []).map((c) =>
+          c.id === card.id ? { ...c, active: !c.active } : c
+        ),
+      }));
+    } catch (err) {
+      console.error('Error toggling active:', err);
+    }
+  }
+
+  function renderIcon(icon: string, size = 'text-xl') {
+    if (!icon) return <i className={`fas fa-question ${size}`}></i>;
+    if (icon.startsWith('fa-')) return <i className={`fas ${icon} ${size}`}></i>;
+    return <span className="leading-none text-2xl">{icon}</span>;
+  }
+
+  const currentCards = allCards[selectedCat] || [];
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-20">
+        <div className="w-10 h-10 border-4 border-slate-200 border-t-indigo-600 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800">จัดการ Cards</h2>
+          <p className="text-sm text-slate-500 mt-1">เพิ่ม แก้ไข หรือลบ Card ในแต่ละหมวดเมนู</p>
+        </div>
+        <button
+          onClick={openAddModal}
+          className="px-5 py-2.5 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-colors flex items-center gap-2 shadow-md"
+        >
+          <i className="fas fa-plus"></i>
+          เพิ่ม Card ใหม่
+        </button>
+      </div>
+
+      {/* Category Tabs */}
+      <div className="flex flex-wrap gap-2 mb-5 mt-5">
+        {MENU_ITEMS.map((item) => {
+          const count = (allCards[item.key] || []).length;
+          const isAct = selectedCat === item.key;
+          return (
+            <button
+              key={item.key}
+              onClick={() => setSelectedCat(item.key)}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-semibold transition-colors border ${
+                isAct
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              <i className={`fas ${item.icon} text-xs ${isAct ? 'text-indigo-200' : 'text-slate-400'}`}></i>
+              <span className="hidden sm:inline">{item.label}</span>
+              <span className={`text-xs px-1.5 py-0.5 rounded-full font-bold ${isAct ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Card List */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        {currentCards.length === 0 ? (
+          <div className="text-center py-16 text-slate-400">
+            <i className="fas fa-layer-group text-4xl mb-3 block"></i>
+            <p className="font-semibold">ยังไม่มี Card ในหมวดนี้</p>
+            <p className="text-sm mt-1">คลิก "+ เพิ่ม Card ใหม่" เพื่อเริ่มต้น</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {currentCards.map((card) => (
+              <div key={card.id} className="flex items-center gap-4 px-5 py-4 hover:bg-slate-50 transition-colors">
+                <div className={`w-12 h-12 ${card.color || 'bg-indigo-600'} rounded-xl flex items-center justify-center text-white flex-shrink-0 shadow`}>
+                  {renderIcon(card.icon)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-slate-800">{card.name}</span>
+                    {(!card.url || card.url === '#') && (
+                      <span className="px-2 py-0.5 text-xs font-semibold bg-amber-100 text-amber-700 rounded-full">ยังไม่มี URL</span>
+                    )}
+                    {card.active ? (
+                      <span className="px-2 py-0.5 text-xs font-semibold bg-green-100 text-green-700 rounded-full">Active</span>
+                    ) : (
+                      <span className="px-2 py-0.5 text-xs font-semibold bg-slate-100 text-slate-500 rounded-full">Inactive</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 truncate mt-0.5">{card.url === '#' ? '—' : card.url}</p>
+                  <p className="text-xs text-slate-500 mt-1 truncate">{card.desc}</p>
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  <button
+                    onClick={() => toggleActive(card)}
+                    className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm transition-colors ${
+                      card.active ? 'bg-green-100 text-green-600 hover:bg-green-200' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
+                    }`}
+                    title={card.active ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
+                  >
+                    <i className="fas fa-check"></i>
+                  </button>
+                  <button
+                    onClick={() => openEditModal(card)}
+                    className="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:bg-indigo-100 hover:text-indigo-600 flex items-center justify-center text-sm transition-colors"
+                    title="แก้ไข"
+                  >
+                    <i className="fas fa-pen"></i>
+                  </button>
+                  <button
+                    onClick={() => setDeleteTarget(card)}
+                    className="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:bg-red-100 hover:text-red-500 flex items-center justify-center text-sm transition-colors"
+                    title="ลบ"
+                  >
+                    <i className="fas fa-trash"></i>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add / Edit Modal */}
+      {showModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+          onClick={() => setShowModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[92vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-6 py-5 border-b sticky top-0 bg-white z-10 rounded-t-2xl">
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 ${form.color} rounded-xl flex items-center justify-center text-white flex-shrink-0`}>
+                  {renderIcon(form.icon)}
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-800">{editCard ? 'แก้ไข Card' : 'เพิ่ม Card ใหม่'}</h3>
+                  <p className="text-xs text-slate-400">
+                    หมวด: {MENU_ITEMS.find((m) => m.key === form.category)?.label || form.category}
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-700 transition-colors p-1">
+                <i className="fas fa-times text-lg"></i>
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-5">
+              {/* Preview */}
+              <div className="bg-slate-50 rounded-xl p-4 flex items-center gap-4 border border-slate-100">
+                <div className={`w-14 h-14 ${form.color} rounded-2xl flex items-center justify-center text-white shadow-lg flex-shrink-0`}>
+                  {renderIcon(form.icon, 'text-3xl')}
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-slate-800 truncate">{form.name || 'ชื่อ Card'}</p>
+                  <p className="text-xs text-slate-500 truncate mt-0.5">{form.url || 'https://...'}</p>
+                  <p className="text-xs text-slate-400 truncate mt-0.5">{form.desc || 'คำอธิบาย...'}</p>
+                </div>
+              </div>
+
+              {/* Emoji */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">
+                  EMOJI (รูปภาพ) — <span className="font-normal text-slate-400 normal-case">วาง emoji ตรงนี้</span>
+                </label>
+                <input
+                  type="text"
+                  value={form.icon.startsWith('fa-') ? '' : form.icon}
+                  onChange={(e) => setForm((p) => ({ ...p, icon: e.target.value || p.icon }))}
+                  placeholder="เช่น 🏢 📊 🚀"
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-2xl outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                  maxLength={4}
+                />
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {EMOJI_SUGGESTIONS.map((em) => (
+                    <button
+                      key={em}
+                      onClick={() => setForm((p) => ({ ...p, icon: em }))}
+                      className={`text-xl p-1.5 rounded-lg transition-colors hover:bg-slate-100 ${form.icon === em ? 'bg-indigo-100 ring-2 ring-indigo-400' : ''}`}
+                    >
+                      {em}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Category */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">
+                  หมวดหมู่ <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={form.category}
+                  onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-sm"
+                >
+                  {MENU_ITEMS.map((m) => (
+                    <option key={m.key} value={m.key}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Name */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">
+                  ชื่อ CARD <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={form.name}
+                  onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder="เช่น QC Dashboard"
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-sm"
+                  maxLength={60}
+                />
+              </div>
+
+              {/* URL */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">
+                  URL <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={form.url}
+                  onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))}
+                  placeholder="https://example.web.app"
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-sm font-mono"
+                />
+                <p className="text-xs text-slate-400 mt-1">ใส่ # ถ้ายังไม่มี URL</p>
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">คำอธิบาย</label>
+                <textarea
+                  value={form.desc}
+                  onChange={(e) => setForm((p) => ({ ...p, desc: e.target.value }))}
+                  placeholder="อธิบายระบบสั้นๆ..."
+                  rows={2}
+                  maxLength={80}
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-sm resize-none"
+                />
+                <p className="text-xs text-slate-400 text-right">{form.desc.length}/80</p>
+              </div>
+
+              {/* Color Picker */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">สีพื้นหลัง ICON (FALLBACK)</label>
+                <div className="flex flex-wrap gap-2">
+                  {CARD_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      onClick={() => setForm((p) => ({ ...p, color }))}
+                      className={`w-8 h-8 rounded-full transition-all ${color} ${
+                        form.color === color ? 'ring-4 ring-offset-1 ring-indigo-500 scale-110' : 'hover:scale-105'
+                      }`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Active Toggle */}
+              <div className="flex items-center justify-between bg-slate-50 rounded-xl p-4 border border-slate-100">
+                <div>
+                  <p className="font-semibold text-sm text-slate-700">สถานะ Card</p>
+                  <p className="text-xs text-slate-400 mt-0.5">{form.active ? 'แสดงบน Dashboard' : 'ซ่อนจาก Dashboard'}</p>
+                </div>
+                <button
+                  onClick={() => setForm((p) => ({ ...p, active: !p.active }))}
+                  className={`relative w-12 h-6 rounded-full transition-colors ${form.active ? 'bg-green-500' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-transform ${form.active ? 'translate-x-7' : 'translate-x-1'}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-4 border-t flex gap-3 justify-end sticky bottom-0 bg-white rounded-b-2xl">
+              <button
+                onClick={() => setShowModal(false)}
+                className="px-4 py-2 text-sm font-semibold text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving || !form.name.trim()}
+                className="px-5 py-2 text-sm font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+              >
+                {saving ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <i className="fas fa-floppy-disk"></i>
+                )}
+                บันทึก
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirm Dialog */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+          onClick={() => setDeleteTarget(null)}
+        >
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-red-100 text-red-500 rounded-xl flex items-center justify-center flex-shrink-0">
+                <i className="fas fa-trash"></i>
+              </div>
+              <h3 className="font-bold text-slate-800">ลบ Card นี้?</h3>
+            </div>
+            <p className="text-sm text-slate-500 mb-6">
+              คุณแน่ใจหรือไม่ว่าต้องการลบ{' '}
+              <span className="font-semibold text-slate-700">"{deleteTarget.name}"</span>?{' '}
+              การกระทำนี้ไม่สามารถย้อนกลับได้
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="px-4 py-2 text-sm font-semibold text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 transition-colors"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={() => handleDelete(deleteTarget)}
+                className="px-5 py-2 text-sm font-semibold text-white bg-red-500 rounded-xl hover:bg-red-600 transition-colors flex items-center gap-2"
+              >
+                <i className="fas fa-trash"></i>ลบ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
