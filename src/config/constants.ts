@@ -1,7 +1,7 @@
 export const APP_NAME = 'PPE-eng-Wep-app';
 export const APP_PREFIX = 'ppe_eng';
 
-export const SESSION_DURATION_MS = 60 * 60 * 1000; // 1 hour
+export const SESSION_DURATION_MS = 365 * 24 * 60 * 60 * 1000; // 1 year (session อยู่ได้นานที่สุด)
 export const SESSION_CHECK_INTERVAL_MS = 60 * 1000; // 60 seconds
 export const SESSION_KEY = `${APP_PREFIX}_session_expires`;
 

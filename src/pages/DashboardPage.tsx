@@ -322,7 +322,7 @@ export default function DashboardPage() {
             {/* Session timer */}
             <div className="hidden sm:flex items-center gap-1.5 text-xs text-slate-500">
               <i className="fas fa-clock"></i>
-              <span>{sessionMinutesLeft} นาที</span>
+              <span>{sessionMinutesLeft >= 60 * 24 ? 'ไม่มีกำหนด' : `${sessionMinutesLeft} นาที`}</span>
             </div>
 
             {/* User badge */}
