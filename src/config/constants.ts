@@ -11,6 +11,7 @@ export const FIRESTORE_PATHS = {
   appMeta: `${APP_NAME}/root/appMeta`,
   appMetaConfig: `${APP_NAME}/root/appMeta/config`,
   rolePermissions: `${APP_NAME}/root/appMeta/rolePermissions`,
+  customMenus: `${APP_NAME}/root/customMenus`,
   activityLogs: `${APP_NAME}/root/activityLogs`,
 } as const;
 
@@ -25,6 +26,14 @@ export const MENU_ITEMS = [
   { key: 'doc', icon: 'fa-folder-tree', label: 'Document Control' },
 ] as const;
 
-export type MenuKey = (typeof MENU_ITEMS)[number]['key'];
+export interface MenuItem {
+  key: string;
+  icon: string;
+  label: string;
+  color?: string;
+  order?: number;
+}
+
+export type MenuKey = string;
 
 export type RolePermissions = Record<string, MenuKey[]>;

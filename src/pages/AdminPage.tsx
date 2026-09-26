@@ -1,10 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { logout } from '../services/auth.service';
 import { logActivity } from '../services/activity.service';
 import { db } from '../config/firebase';
-import { FIRESTORE_PATHS, MENU_ITEMS, type MenuKey, type RolePermissions } from '../config/constants';
+import { FIRESTORE_PATHS, MENU_ITEMS, type MenuItem, type MenuKey, type RolePermissions } from '../config/constants';
 import {
   collection,
   getDocs,
@@ -15,6 +15,8 @@ import {
   deleteDoc,
   query,
   orderBy,
+  runTransaction,
+  writeBatch,
 } from 'firebase/firestore';
 import { USER_ROLES, type UserProfile, type UserRole } from '../types/auth';
 
@@ -43,6 +45,12 @@ interface CardForm {
   category: string;
 }
 
+interface MenuForm {
+  label: string;
+  icon: string;
+  color: string;
+}
+
 const CARD_COLORS = [
   'bg-indigo-600', 'bg-sky-500',    'bg-teal-500',   'bg-emerald-500',
   'bg-green-600',  'bg-lime-500',   'bg-yellow-500', 'bg-orange-500',
@@ -56,12 +64,28 @@ const EMOJI_SUGGESTIONS = [
   '⚙️','🛡️','📐','🏗️','🧾','📦','🖥️','📡',
 ];
 
+const MENU_ICON_OPTIONS = [
+  'fa-circle-info', 'fa-rocket', 'fa-lightbulb', 'fa-gear', 'fa-folder', 'fa-star',
+  'fa-chart-pie', 'fa-users', 'fa-calculator', 'fa-briefcase', 'fa-shield-halved',
+  'fa-handshake', 'fa-headset', 'fa-building', 'fa-compass-drafting', 'fa-calendar-check',
+  'fa-gavel', 'fa-cart-shopping', 'fa-code', 'fa-coins', 'fa-chart-line', 'fa-hard-hat',
+  'fa-magnifying-glass-chart', 'fa-house', 'fa-sun', 'fa-arrow-up-right-from-square',
+  'fa-file-lines', 'fa-award', 'fa-wrench', 'fa-truck', 'fa-box-archive',
+];
+
+const MENU_ICON_COLORS = [
+  '#38bdf8', '#34d399', '#fbbf24', '#2dd4bf', '#818cf8', '#c084fc', '#fb7185',
+  '#fb923c', '#60a5fa', '#a3e635', '#84cc16', '#f472b6', '#a78bfa', '#22d3ee',
+  '#cbd5e1', '#f87171', '#14b8a6', '#facc15', '#4ade80', '#e879f9',
+];
+
 export default function AdminPage() {
   const { userProfile } = useAuth();
   const navigate = useNavigate();
 
   const [adminTab, setAdminTab] = useState<AdminTab>('users');
   const [pendingCount, setPendingCount] = useState(0);
+  const [customMenus, setCustomMenus] = useState<MenuItem[]>([]);
 
   useEffect(() => {
     async function loadPending() {
@@ -75,6 +99,23 @@ export default function AdminPage() {
     }
     loadPending();
   }, []);
+
+  useEffect(() => {
+    async function loadCustomMenus() {
+      try {
+        const snapshot = await getDocs(collection(db, FIRESTORE_PATHS.customMenus));
+        const menus = snapshot.docs
+          .map((menuDoc) => ({ key: menuDoc.id, ...menuDoc.data() } as MenuItem))
+          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        setCustomMenus(menus);
+      } catch (err) {
+        console.error('Error loading custom menus:', err);
+      }
+    }
+    loadCustomMenus();
+  }, []);
+
+  const menuItems = useMemo<MenuItem[]>(() => [...MENU_ITEMS, ...customMenus], [customMenus]);
 
   async function handleLogout() {
     await logout();
@@ -152,9 +193,14 @@ export default function AdminPage() {
         {adminTab === 'users' ? (
           <UserManagement userProfile={userProfile} />
         ) : adminTab === 'permissions' ? (
-          <PermissionManagement userProfile={userProfile} />
+          <PermissionManagement userProfile={userProfile} menuItems={menuItems} />
         ) : (
-          <CardManagement userProfile={userProfile} />
+          <CardManagement
+            userProfile={userProfile}
+            menuItems={menuItems}
+            onMenuCreated={(menu) => setCustomMenus((prev) => [...prev, menu])}
+            onMenuDeleted={(menuKey) => setCustomMenus((prev) => prev.filter((menu) => menu.key !== menuKey))}
+          />
         )}
       </main>
     </div>
@@ -411,7 +457,7 @@ function UserManagement({ userProfile }: { userProfile: UserProfile | null }) {
 // ══════════════════════════════════════════════
 // Tab 2: Role Permission Management
 // ══════════════════════════════════════════════
-function PermissionManagement({ userProfile }: { userProfile: UserProfile | null }) {
+function PermissionManagement({ userProfile, menuItems }: { userProfile: UserProfile | null; menuItems: MenuItem[] }) {
   const [perms, setPerms] = useState<RolePermissions>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -419,7 +465,7 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
 
   useEffect(() => {
     loadPermissions();
-  }, []);
+  }, [menuItems]);
 
   async function loadPermissions() {
     setLoading(true);
@@ -430,7 +476,7 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
       } else {
         // Initialize with all roles having all menus
         const initial: RolePermissions = {};
-        const allKeys = MENU_ITEMS.map((m) => m.key) as MenuKey[];
+        const allKeys = menuItems.map((m) => m.key);
         for (const role of USER_ROLES) {
           initial[role] = [...allKeys];
         }
@@ -455,7 +501,7 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
   }
 
   function selectAll(role: string) {
-    const allKeys = MENU_ITEMS.map((m) => m.key) as MenuKey[];
+    const allKeys = menuItems.map((m) => m.key);
     setPerms((prev) => ({ ...prev, [role]: [...allKeys] }));
     setSaveMsg('');
   }
@@ -535,7 +581,7 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
                 <th className="text-left px-4 py-3 font-semibold text-slate-600 sticky left-0 bg-slate-50 z-10 min-w-[160px]">
                   Role
                 </th>
-                {MENU_ITEMS.map((m) => (
+                {menuItems.map((m) => (
                   <th key={m.key} className="text-center px-3 py-3 font-semibold text-slate-600 min-w-[120px]">
                     <div className="flex flex-col items-center gap-1">
                       <i className={`fas ${m.icon} text-base text-slate-400`}></i>
@@ -549,7 +595,7 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
             <tbody className="divide-y divide-slate-100">
               {editableRoles.map((role) => {
                 const roleMenus = perms[role] || [];
-                const allKeys = MENU_ITEMS.map((m) => m.key);
+                const allKeys = menuItems.map((m) => m.key);
                 const allSelected = allKeys.every((k) => roleMenus.includes(k as MenuKey));
                 return (
                   <tr key={role} className="hover:bg-slate-50 transition-colors">
@@ -558,7 +604,7 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
                         {role}
                       </span>
                     </td>
-                    {MENU_ITEMS.map((m) => {
+                    {menuItems.map((m) => {
                       const checked = roleMenus.includes(m.key as MenuKey);
                       return (
                         <td key={m.key} className="text-center px-3 py-3">
@@ -601,14 +647,31 @@ function PermissionManagement({ userProfile }: { userProfile: UserProfile | null
 // ══════════════════════════════════════════════
 // Tab 3: Card Management
 // ══════════════════════════════════════════════
-function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfile | null }) {
+function CardManagement({
+  userProfile,
+  menuItems,
+  onMenuCreated,
+  onMenuDeleted,
+}: {
+  userProfile: UserProfile | null;
+  menuItems: MenuItem[];
+  onMenuCreated: (menu: MenuItem) => void;
+  onMenuDeleted: (menuKey: string) => void;
+}) {
   const [selectedCat, setSelectedCat] = useState<string>(MENU_ITEMS[0].key);
   const [allCards, setAllCards] = useState<Record<string, CardItem[]>>({});
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editCard, setEditCard] = useState<CardItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CardItem | null>(null);
+  const [deleteMenuTarget, setDeleteMenuTarget] = useState<MenuItem | null>(null);
+  const [deletingMenu, setDeletingMenu] = useState(false);
+  const [deleteMenuError, setDeleteMenuError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [showMenuModal, setShowMenuModal] = useState(false);
+  const [menuSaving, setMenuSaving] = useState(false);
+  const [menuSaveError, setMenuSaveError] = useState('');
+  const [menuForm, setMenuForm] = useState<MenuForm>({ label: '', icon: 'fa-layer-group', color: '#34d399' });
 
   const DEFAULT_FORM: CardForm = {
     name: '', url: '', icon: '🌐', color: 'bg-indigo-600',
@@ -616,13 +679,13 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
   };
   const [form, setForm] = useState<CardForm>(DEFAULT_FORM);
 
-  useEffect(() => { loadAllCards(); }, []);
+  useEffect(() => { loadAllCards(); }, [menuItems]);
 
   async function loadAllCards() {
     setLoading(true);
     try {
       const loaded: Record<string, CardItem[]> = {};
-      for (const item of MENU_ITEMS) {
+      for (const item of menuItems) {
         const ref = collection(db, 'PPE-eng-Wep-app', 'root', item.key);
         const snap = await getDocs(ref);
         loaded[item.key] = snap.docs
@@ -724,6 +787,112 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
     }
   }
 
+  async function handleCreateMenu() {
+    if (!menuForm.label.trim()) return;
+    setMenuSaving(true);
+    setMenuSaveError('');
+    try {
+      const menuRef = doc(collection(db, FIRESTORE_PATHS.customMenus));
+      const permissionsRef = doc(db, FIRESTORE_PATHS.rolePermissions);
+      const newMenu: MenuItem = {
+        key: menuRef.id,
+        label: menuForm.label.trim(),
+        icon: menuForm.icon,
+        color: menuForm.color,
+        order: menuItems.length,
+      };
+
+      await runTransaction(db, async (transaction) => {
+        const permissionsSnapshot = await transaction.get(permissionsRef);
+        const currentPermissions = permissionsSnapshot.exists()
+          ? permissionsSnapshot.data() as RolePermissions
+          : {};
+        const allMenuKeys = [...menuItems.map((menu) => menu.key), newMenu.key];
+        const nextPermissions: RolePermissions = { ...currentPermissions };
+
+        for (const role of USER_ROLES) {
+          const currentRoleMenus = currentPermissions[role];
+          nextPermissions[role] = Array.isArray(currentRoleMenus)
+            ? Array.from(new Set([...currentRoleMenus, newMenu.key]))
+            : allMenuKeys;
+        }
+
+        transaction.set(menuRef, {
+          label: newMenu.label,
+          icon: newMenu.icon,
+          color: newMenu.color,
+          order: newMenu.order,
+        });
+        transaction.set(permissionsRef, nextPermissions);
+      });
+
+      onMenuCreated(newMenu);
+      setAllCards((prev) => ({ ...prev, [newMenu.key]: [] }));
+      setSelectedCat(newMenu.key);
+      setMenuForm({ label: '', icon: 'fa-layer-group', color: '#34d399' });
+      setShowMenuModal(false);
+      if (userProfile) {
+        logActivity('ADD_MENU', userProfile.uid, userProfile.email, `Added Sidebar menu: ${newMenu.label}`);
+      }
+    } catch (err) {
+      console.error('Error creating menu:', err);
+      setMenuSaveError('บันทึกเมนูไม่สำเร็จ กรุณาลองอีกครั้ง');
+    } finally {
+      setMenuSaving(false);
+    }
+  }
+
+  async function handleDeleteMenu() {
+    if (!deleteMenuTarget) return;
+    setDeletingMenu(true);
+    setDeleteMenuError('');
+    try {
+      const menuKey = deleteMenuTarget.key;
+      const cardsSnapshot = await getDocs(collection(db, 'PPE-eng-Wep-app', 'root', menuKey));
+
+      // Firestore batches are limited to 500 writes; clear any cards in chunks first.
+      for (let start = 0; start < cardsSnapshot.docs.length; start += 500) {
+        const batch = writeBatch(db);
+        cardsSnapshot.docs.slice(start, start + 500).forEach((cardDoc) => batch.delete(cardDoc.ref));
+        await batch.commit();
+      }
+
+      const menuRef = doc(db, FIRESTORE_PATHS.customMenus, menuKey);
+      const permissionsRef = doc(db, FIRESTORE_PATHS.rolePermissions);
+      await runTransaction(db, async (transaction) => {
+        const permissionsSnapshot = await transaction.get(permissionsRef);
+        if (permissionsSnapshot.exists()) {
+          const currentPermissions = permissionsSnapshot.data() as RolePermissions;
+          const nextPermissions: RolePermissions = {};
+          for (const [role, menuKeys] of Object.entries(currentPermissions)) {
+            nextPermissions[role] = Array.isArray(menuKeys)
+              ? menuKeys.filter((key) => key !== menuKey)
+              : [];
+          }
+          transaction.set(permissionsRef, nextPermissions);
+        }
+        transaction.delete(menuRef);
+      });
+
+      onMenuDeleted(menuKey);
+      if (userProfile) {
+        logActivity('DELETE_MENU', userProfile.uid, userProfile.email, `Deleted Sidebar menu: ${deleteMenuTarget.label}`);
+      }
+      setAllCards((previous) => {
+        const next = { ...previous };
+        delete next[menuKey];
+        return next;
+      });
+      if (selectedCat === menuKey) setSelectedCat(MENU_ITEMS[0].key);
+      setDeleteMenuTarget(null);
+    } catch (err) {
+      console.error('Error deleting menu:', err);
+      setDeleteMenuError('ลบเมนูไม่สำเร็จ กรุณาลองอีกครั้ง');
+    } finally {
+      setDeletingMenu(false);
+    }
+  }
+
   function renderIcon(icon: string, size = 'text-xl') {
     if (!icon) return <i className={`fas fa-question ${size}`}></i>;
     if (icon.startsWith('fa-')) return <i className={`fas ${icon} ${size}`}></i>;
@@ -748,36 +917,58 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
           <h2 className="text-2xl font-bold text-slate-800">จัดการ Cards</h2>
           <p className="text-sm text-slate-500 mt-1">เพิ่ม แก้ไข หรือลบ Card ในแต่ละหมวดเมนู</p>
         </div>
-        <button
-          onClick={openAddModal}
-          className="px-5 py-2.5 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-colors flex items-center gap-2 shadow-md"
-        >
-          <i className="fas fa-plus"></i>
-          เพิ่ม Card ใหม่
-        </button>
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <button
+            onClick={() => { setMenuSaveError(''); setShowMenuModal(true); }}
+            className="px-4 py-2.5 bg-emerald-600 text-white font-semibold rounded-xl hover:bg-emerald-700 transition-colors flex items-center gap-2 shadow-md"
+          >
+            <i className="fas fa-folder-plus"></i>
+            เพิ่มเมนู
+          </button>
+          <button
+            onClick={openAddModal}
+            className="px-5 py-2.5 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-colors flex items-center gap-2 shadow-md"
+          >
+            <i className="fas fa-plus"></i>
+            เพิ่ม Card ใหม่
+          </button>
+        </div>
       </div>
 
       {/* Category Tabs */}
       <div className="flex flex-wrap gap-2 mb-5 mt-5">
-        {MENU_ITEMS.map((item) => {
+        {menuItems.map((item) => {
           const count = (allCards[item.key] || []).length;
           const isAct = selectedCat === item.key;
+          const isCustomMenu = !MENU_ITEMS.some((menu) => menu.key === item.key);
           return (
-            <button
-              key={item.key}
-              onClick={() => setSelectedCat(item.key)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-semibold transition-colors border ${
-                isAct
-                  ? 'bg-indigo-600 text-white border-indigo-600 shadow'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-              }`}
-            >
-              <i className={`fas ${item.icon} text-xs ${isAct ? 'text-indigo-200' : 'text-slate-400'}`}></i>
-              <span className="hidden sm:inline">{item.label}</span>
-              <span className={`text-xs px-1.5 py-0.5 rounded-full font-bold ${isAct ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                {count}
-              </span>
-            </button>
+            <div key={item.key} className="flex items-center gap-1">
+              <button
+                onClick={() => setSelectedCat(item.key)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-sm font-semibold transition-colors border ${
+                  isAct
+                    ? 'bg-indigo-600 text-white border-indigo-600 shadow'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                }`}
+              >
+                <i className={`fas ${item.icon} text-xs ${isAct ? 'text-indigo-200' : 'text-slate-400'}`} style={{ color: !isAct ? item.color : undefined }}></i>
+                <span className="hidden sm:inline">{item.label}</span>
+                <span className={`text-xs px-1.5 py-0.5 rounded-full font-bold ${isAct ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                  {count}
+                </span>
+              </button>
+              {isCustomMenu && (
+                <button
+                  type="button"
+                  onClick={() => { setDeleteMenuError(''); setDeleteMenuTarget(item); }}
+                  title={`ลบเมนู ${item.label}`}
+                  aria-label={`ลบเมนู ${item.label}`}
+                  className="w-8 h-8 rounded-lg bg-white border border-slate-200 text-slate-400 hover:bg-red-50 hover:border-red-200 hover:text-red-600 flex items-center justify-center transition-colors"
+                >
+                  <i className="fas fa-trash text-xs"></i>
+                </button>
+              )}
+            </div>
           );
         })}
       </div>
@@ -843,6 +1034,141 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
         )}
       </div>
 
+      {/* Add Menu Modal */}
+      {showMenuModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+          onClick={() => !menuSaving && setShowMenuModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-menu-title"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
+                  <i className="fas fa-folder-plus"></i>
+                </div>
+                <div>
+                  <h3 id="add-menu-title" className="font-bold text-slate-800">เพิ่มเมนูใหม่</h3>
+                  <p className="text-xs text-slate-400">จะแสดงบน Sidebar และ Dashboard</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowMenuModal(false)}
+                disabled={menuSaving}
+                className="text-slate-400 hover:text-slate-700 p-1 disabled:opacity-50"
+                aria-label="ปิดหน้าต่าง"
+              >
+                <i className="fas fa-times text-lg"></i>
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto">
+              <div className="rounded-xl bg-slate-900 text-white p-4 flex items-center gap-3">
+                <i className={`fas ${menuForm.icon} text-xl`} style={{ color: menuForm.color }}></i>
+                <span className="font-semibold">{menuForm.label || 'ตัวอย่างชื่อเมนู'}</span>
+              </div>
+
+              <div>
+                <label htmlFor="new-menu-label" className="block text-xs font-semibold text-slate-600 mb-2">
+                  ชื่อเมนู <span className="text-red-500">*</span>
+                </label>
+                <input
+                  id="new-menu-label"
+                  type="text"
+                  autoFocus
+                  maxLength={50}
+                  value={menuForm.label}
+                  onChange={(event) => setMenuForm((current) => ({ ...current, label: event.target.value }))}
+                  placeholder="เช่น CMG Innovation, Safety Control..."
+                  className="w-full px-4 py-2.5 border-2 border-slate-200 rounded-xl outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100 text-sm"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="new-menu-icon" className="block text-xs font-semibold text-slate-600 mb-2">
+                  ICON (FONTAWESOME CLASS)
+                </label>
+                <div className="relative">
+                  <i className={`fas ${menuForm.icon} absolute left-3 top-3 text-slate-500`}></i>
+                  <input
+                    id="new-menu-icon"
+                    type="text"
+                    value={menuForm.icon}
+                    onChange={(event) => {
+                      const icon = event.target.value.trim().replace(/^fas\s+/, '');
+                      setMenuForm((current) => ({ ...current, icon }));
+                    }}
+                    placeholder="fa-layer-group"
+                    className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500 font-mono text-sm"
+                  />
+                </div>
+                <p className="text-xs text-slate-400 mt-2">เลือก Icon ยอดนิยม:</p>
+                <div className="grid grid-cols-8 gap-1.5 mt-2 p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+                  {MENU_ICON_OPTIONS.map((icon) => (
+                    <button
+                      key={icon}
+                      type="button"
+                      title={icon}
+                      aria-label={icon}
+                      onClick={() => setMenuForm((current) => ({ ...current, icon }))}
+                      className={`h-8 rounded-lg text-slate-600 hover:bg-white hover:text-emerald-600 transition-colors ${menuForm.icon === icon ? 'bg-white text-emerald-600 ring-1 ring-emerald-500' : ''}`}
+                    >
+                      <i className={`fas ${icon}`}></i>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <span className="block text-xs font-semibold text-slate-600 mb-2">สี ICON บน SIDEBAR</span>
+                <div className="flex flex-wrap gap-2 p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+                  {MENU_ICON_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      title={color}
+                      aria-label={`เลือกสี ${color}`}
+                      onClick={() => setMenuForm((current) => ({ ...current, color }))}
+                      className={`w-7 h-7 rounded-lg bg-slate-900 flex items-center justify-center transition-transform hover:scale-110 ${menuForm.color === color ? 'ring-2 ring-offset-2 ring-emerald-500 scale-110' : ''}`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }}></span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {menuSaveError && <p className="text-sm text-red-600">{menuSaveError}</p>}
+            </div>
+
+            <div className="px-6 py-4 border-t bg-slate-50 flex justify-end gap-3">
+              <button
+                onClick={() => setShowMenuModal(false)}
+                disabled={menuSaving}
+                className="px-4 py-2 text-sm font-semibold text-slate-600 rounded-xl hover:bg-slate-200 disabled:opacity-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={handleCreateMenu}
+                disabled={menuSaving || !menuForm.label.trim() || !menuForm.icon.trim()}
+                className="px-5 py-2 text-sm font-semibold text-white bg-emerald-600 rounded-xl hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {menuSaving ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <i className="fas fa-floppy-disk"></i>
+                )}
+                เพิ่มเมนูใหม่
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Add / Edit Modal */}
       {showModal && (
         <div
@@ -862,7 +1188,7 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
                 <div>
                   <h3 className="font-bold text-slate-800">{editCard ? 'แก้ไข Card' : 'เพิ่ม Card ใหม่'}</h3>
                   <p className="text-xs text-slate-400">
-                    หมวด: {MENU_ITEMS.find((m) => m.key === form.category)?.label || form.category}
+                    หมวด: {menuItems.find((m) => m.key === form.category)?.label || form.category}
                   </p>
                 </div>
               </div>
@@ -920,7 +1246,7 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
                   onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
                   className="w-full px-4 py-2.5 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 bg-white text-sm"
                 >
-                  {MENU_ITEMS.map((m) => (
+                  {menuItems.map((m) => (
                     <option key={m.key} value={m.key}>{m.label}</option>
                   ))}
                 </select>
@@ -1020,6 +1346,55 @@ function CardManagement({ userProfile: _userProfile }: { userProfile: UserProfil
                   <i className="fas fa-floppy-disk"></i>
                 )}
                 บันทึก
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Menu Confirm Dialog */}
+      {deleteMenuTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+          onClick={() => !deletingMenu && setDeleteMenuTarget(null)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-menu-title"
+            className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-red-100 text-red-600 rounded-xl flex items-center justify-center flex-shrink-0">
+                <i className="fas fa-trash"></i>
+              </div>
+              <h3 id="delete-menu-title" className="font-bold text-slate-800">ลบเมนูนี้?</h3>
+            </div>
+            <p className="text-sm text-slate-600 mb-2">
+              ต้องการลบเมนู <span className="font-semibold text-slate-800">“{deleteMenuTarget.label}”</span> ใช่หรือไม่?
+            </p>
+            <p className="text-xs text-red-600 mb-5">Card ทั้งหมดในเมนูนี้และข้อมูลสิทธิ์จะถูกลบด้วย และไม่สามารถย้อนกลับได้</p>
+            {deleteMenuError && <p className="text-sm text-red-600 mb-4">{deleteMenuError}</p>}
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setDeleteMenuTarget(null)}
+                disabled={deletingMenu}
+                className="px-4 py-2 text-sm font-semibold text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 disabled:opacity-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={handleDeleteMenu}
+                disabled={deletingMenu}
+                className="px-5 py-2 text-sm font-semibold text-white bg-red-600 rounded-xl hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+              >
+                {deletingMenu ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <i className="fas fa-trash"></i>
+                )}
+                ลบเมนู
               </button>
             </div>
           </div>

@@ -39,7 +39,7 @@ export interface AppMetaConfig {
 }
 
 export interface ActivityLog {
-  action: 'REGISTER' | 'LOGIN' | 'LOGOUT' | 'APPROVE_USER' | 'REJECT_USER' | 'UPDATE_ROLE' | 'UPDATE_PERMISSIONS';
+  action: 'REGISTER' | 'LOGIN' | 'LOGOUT' | 'APPROVE_USER' | 'REJECT_USER' | 'UPDATE_ROLE' | 'UPDATE_PERMISSIONS' | 'ADD_MENU' | 'DELETE_MENU';
   uid: string;
   email: string;
   details?: string;

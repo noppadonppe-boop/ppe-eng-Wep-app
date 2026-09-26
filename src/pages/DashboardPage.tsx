@@ -4,7 +4,7 @@ import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { logout } from '../services/auth.service';
-import { MENU_ITEMS, FIRESTORE_PATHS, type RolePermissions } from '../config/constants';
+import { MENU_ITEMS, FIRESTORE_PATHS, type MenuItem, type RolePermissions } from '../config/constants';
 
 // ──────────────────────────────────────────────
 // Fallback data (เหมือนเดิม)
@@ -103,6 +103,7 @@ export default function DashboardPage() {
 
   const [activeTab, setActiveTab] = useState('');
   const [appData, setAppData] = useState(fallbackData);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>([...MENU_ITEMS]);
   const [dataLoading, setDataLoading] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
@@ -116,9 +117,9 @@ export default function DashboardPage() {
   const visibleMenuItems = useMemo(() => {
     if (!userProfile) return [];
     // MasterAdmin sees everything
-    if (userProfile.role.includes('MasterAdmin')) return [...MENU_ITEMS];
+    if (userProfile.role.includes('MasterAdmin')) return [...menuItems];
     // No permissions doc loaded yet → show all (fallback)
-    if (!rolePerms) return [...MENU_ITEMS];
+    if (!rolePerms) return [...menuItems];
 
     const allowedKeys = new Set<string>();
     for (const role of userProfile.role) {
@@ -126,9 +127,9 @@ export default function DashboardPage() {
       if (menus) menus.forEach((k) => allowedKeys.add(k));
     }
     // If no permissions configured for any of the user's roles, show all
-    if (allowedKeys.size === 0) return [...MENU_ITEMS];
-    return MENU_ITEMS.filter((m) => allowedKeys.has(m.key));
-  }, [userProfile, rolePerms]);
+    if (allowedKeys.size === 0) return [...menuItems];
+    return menuItems.filter((m) => allowedKeys.has(m.key));
+  }, [userProfile, rolePerms, menuItems]);
 
   // Load Firestore data + pending count + role permissions
   useEffect(() => {
@@ -138,11 +139,21 @@ export default function DashboardPage() {
     async function loadAll() {
       setDataLoading(true);
       try {
-        // 1) Load app data from Firestore
-        const loaded: typeof fallbackData = {};
-        const categories = MENU_ITEMS.map((m) => m.key);
+        // 1) Load menu definitions and app data from Firestore
+        const customMenuSnapshot = await getDocs(collection(db, FIRESTORE_PATHS.customMenus));
+        const customMenus = customMenuSnapshot.docs
+          .map((menuDoc) => ({ key: menuDoc.id, ...menuDoc.data() } as MenuItem))
+          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+        const loadedMenus: MenuItem[] = [...MENU_ITEMS, ...customMenus];
+        if (!cancelled) setMenuItems(loadedMenus);
 
-        for (const category of categories) {
+        const loaded: typeof fallbackData = { ...fallbackData };
+        for (const menu of customMenus) {
+          loaded[menu.key] = { title: menu.label, apps: [] };
+        }
+
+        for (const menu of loadedMenus) {
+          const category = menu.key;
           const appsRef = collection(db, 'PPE-eng-Wep-app', 'root', category);
           const snapshot = await getDocs(appsRef);
           if (!snapshot.empty) {
@@ -153,12 +164,12 @@ export default function DashboardPage() {
               .filter((app) => app.active !== false)
               .sort((a, b) => (a.order || 0) - (b.order || 0));
             loaded[category] = {
-              title: metaDoc ? (metaDoc.data().title as string) : category,
+              title: metaDoc ? (metaDoc.data().title as string) : (loaded[category]?.title || menu.label),
               apps,
             };
           }
         }
-        if (!cancelled && Object.keys(loaded).length > 0) {
+        if (!cancelled) {
           setAppData(loaded);
         }
 
@@ -261,7 +272,7 @@ export default function DashboardPage() {
                     : ''
                 }`}
               >
-                <i className={`fas ${item.icon} w-8 text-lg`}></i>
+                <i className={`fas ${item.icon} w-8 text-lg`} style={{ color: item.color }}></i>
                 <span className="text-left">{item.label}</span>
               </button>
             );
@@ -355,6 +366,16 @@ export default function DashboardPage() {
             <div className="flex flex-col items-center justify-center py-20">
               <div className="w-10 h-10 border-4 border-slate-200 border-t-indigo-600 rounded-full animate-spin mb-4" />
               <p className="text-slate-500 text-sm">กำลังโหลดข้อมูลจาก Database...</p>
+            </div>
+          ) : currentData?.apps.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-24 text-center">
+              <i className={`fas ${menuItems.find((menu) => menu.key === activeTab)?.icon || 'fa-layer-group'} text-4xl mb-4`} style={{ color: menuItems.find((menu) => menu.key === activeTab)?.color || '#94a3b8' }}></i>
+              <p className="font-semibold text-slate-700">ยังไม่มี Card ในเมนูนี้</p>
+              {isAdmin && (
+                <Link to="/admin" className="mt-2 text-sm font-semibold text-indigo-600 hover:text-indigo-700">
+                  ไปที่ Admin Panel เพื่อเพิ่ม Card
+                </Link>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 pb-10">
